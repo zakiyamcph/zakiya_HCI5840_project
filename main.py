@@ -138,14 +138,13 @@ def compute_momentum(df):
 
 # Identify biggest momentum swings
 
-def find_top_swings(df, n=5):
+def find_lead_changes(df):
 
-    scoring = df[df["scoringPlay"] == True].copy()
-    if scoring.empty:
-        scoring = df.copy()
-
-    top = scoring.nlargest(n, "swing")
-    return top
+    import numpy as np
+    sign = np.sign(df["momentum"]).astype(int)
+    prev = sign.replace(0, np.nan).ffill().shift()
+    mask = (sign != 0) & (sign != prev)
+    return df[mask.fillna(False)].copy()
 
 # Quarter / OT divider lines along the game-minute scale
 def add_period_markers(fig, max_minutes):
@@ -171,7 +170,7 @@ def add_period_markers(fig, max_minutes):
                            font=dict(size=11, color="rgba(0,0,0,0.45)"))
 
 # Plotly graph
-def plot_momentum(df, top_swings, home_name="Home", away_name="Away"):
+def plot_momentum(df, lead_changes, home_name="Home", away_name="Away"):
 
     fig = go.Figure()
 
@@ -201,14 +200,14 @@ def plot_momentum(df, top_swings, home_name="Home", away_name="Away"):
     )
 
     # --- Top-swing markers ---
-    if not top_swings.empty:
+    if not lead_changes.empty:
         fig.add_trace(go.Scatter(
-            x=top_swings["gameMinutes"],
-            y=top_swings["momentum"],
+            x=lead_changes["gameMinutes"],
+            y=lead_changes["momentum"],
             mode="markers+text",
-            name="Big swing",
+            name="Lead change",
             marker=dict(color="#c8102e", size=12, symbol="star"),   # NBA red
-            text=top_swings["swing"].apply(lambda s: f"+{int(s)}"),
+            text=lead_changes["swing"].apply(lambda s: f"+{int(s)}"),
             textposition="top center",
             hovertemplate=(
                 "%{customdata[0]}<br>"
@@ -216,7 +215,7 @@ def plot_momentum(df, top_swings, home_name="Home", away_name="Away"):
                 "Differential: %{y}<br>"
                 "%{customdata[1]}<extra></extra>"
             ),
-            customdata=top_swings[["timeLabel", "text", "homeScore", "awayScore"]],
+            customdata=lead_changes[["timeLabel", "text", "homeScore", "awayScore"]],
         ))
 
 # --- Quarter / OT divider lines along the game-minute scale ---
@@ -235,6 +234,49 @@ def plot_momentum(df, top_swings, home_name="Home", away_name="Away"):
 
     return fig
 
+# Overlay two games' momentum lines on one shared game-time chart
+def plot_comparison(games):
+    fig = go.Figure()
+    colors = ["#1d428a", "#c8102e"]   # NBA blue / NBA red
+
+    for game, color in zip(games, colors):
+        df = game["df"]
+        fig.add_trace(go.Scatter(
+            x=df["gameMinutes"],
+            y=df["momentum"],
+            mode="lines",
+            name=game["label"],
+            line=dict(color=color, width=2),
+            hovertemplate=(
+                "%{customdata[0]}<br>"
+                "Differential: %{y}<br>"
+                "%{customdata[1]}<extra>" + game["label"] + "</extra>"
+            ),
+            customdata=df[["timeLabel", "text"]],
+        ))
+
+    fig.add_hline(
+        y=0,
+        line_dash="dash",
+        line_color="gray",
+        annotation_text="Tied",
+        annotation_position="right",
+    )
+
+    max_minutes = max(g["df"]["gameMinutes"].max() for g in games)
+    add_period_markers(fig, max_minutes)
+
+    fig.update_layout(
+        title="Game Comparison — " + "  vs  ".join(g["label"] for g in games),
+        xaxis_title="Game Minutes",
+        yaxis_title="Score differential (home − away)",
+        template="plotly_white",
+        hovermode="x unified",
+        xaxis=dict(dtick=6, range=[0, max(48, max_minutes)]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+
+    return fig
 
 def save_csv(df, path):
 
@@ -415,18 +457,20 @@ def main():
     print(f"  Total plays: {len(df)}")
     print("=" * 50 + "\n")
 
-    top_swings = find_top_swings(df, n=5)
-    print("Top 5 momentum swings:")
-    for i, (_, row) in enumerate(top_swings.iterrows(), 1):
-        swing_val = int(row["swing"]) if pd.notna(row["swing"]) else 0
-        print(f"  {i}. [{row['team']}] {row['text'][:80]}  (swing: +{swing_val})")
+    lead_changes = find_lead_changes(df)
+    print(f"Lead changes: {len(lead_changes)}")
+    if lead_changes.empty:
+        print("  None — wire-to-wire win!")
+    for _, row in lead_changes.iterrows():
+        leader = home_name if row["momentum"] > 0 else away_name
+        print(f"  {row['timeLabel']:>10s}  {leader} take the lead  ({row['text'][:60]})")
     print()
 
     csv_path = os.path.join(DATA_DIR, f"play_by_play_{game_id}.csv")
     save_csv(df, csv_path)
 
     # Build chart and open in browser
-    fig = plot_momentum(df, top_swings, home_name=home_name, away_name=away_name)
+    fig = plot_momentum(df, lead_changes, home_name=home_name, away_name=away_name)
     fig.write_html(OUTPUT_HTML)
     print(f"[chart] Chart saved to {OUTPUT_HTML}")
     fig.show()   # opens in default browser
