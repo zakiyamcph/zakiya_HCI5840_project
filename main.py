@@ -136,7 +136,7 @@ def compute_momentum(df):
     return df
 
 
-# Identify biggest momentum swings
+# Identify lead changes
 
 def find_lead_changes(df):
 
@@ -199,7 +199,7 @@ def plot_momentum(df, lead_changes, home_name="Home", away_name="Away"):
         annotation_position="right",
     )
 
-    # --- Top-swing markers ---
+    # --- Lead change markers ---
     if not lead_changes.empty:
         fig.add_trace(go.Scatter(
             x=lead_changes["gameMinutes"],
@@ -235,6 +235,9 @@ def plot_momentum(df, lead_changes, home_name="Home", away_name="Away"):
     return fig
 
 # Overlay two games' momentum lines on one shared game-time chart
+# GOTCHA: both lines are drawn as home minus away, so a team that was home in one game and away
+# in the other appears above zero in one and below zero in the other. Easy to misread.
+# TODO: accept a reference-team argument and negate the differential when that team was away.
 def plot_comparison(games):
     fig = go.Figure()
     colors = ["#1d428a", "#c8102e"]   # NBA blue / NBA red
