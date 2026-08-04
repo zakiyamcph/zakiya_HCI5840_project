@@ -1,6 +1,6 @@
 # NBA Game Visualizer
 
-Thia project turns an NBA box score into a chart. Pick a team, pick a completed game, and the app charts the score differential play by play across game time, marking every lead change along the way. A comparison mode overlays two games on the same time axis so their momentum patterns can be read side by side.
+This project turns an NBA box score into a chart. Pick a team, pick a completed game, and the app charts the score differential play by play across game time, marking every lead change along the way. A comparison mode overlays two games on the same time axis so their momentum patterns can be read side by side.
 
 Data comes from ESPN's public NBA endpoints. 
 
