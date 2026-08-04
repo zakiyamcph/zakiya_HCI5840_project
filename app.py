@@ -1,3 +1,24 @@
+"""Streamlit web front end for the NBA game momentum visualizer.
+
+This module is the interface layer and nothing else. Every fetch, transform,
+and plotting function is imported from main.py, so the web app and the command
+line app always draw the same charts from the same data. If a function does
+real work, it belongs in main.py, not here.
+
+Two things about Streamlit shape this file. First, the whole script reruns top
+to bottom on every widget interaction, so module level state does not survive a
+click and any uncached network call would fire again every time. That is what
+the three ``@st.cache_data`` wrappers below are for. Second, every widget needs
+a unique key, which is why render_game_picker() takes a slot argument: it lets
+two independent pickers coexist in compare mode.
+
+Use:
+    $ streamlit run app.py
+
+Running ``python app.py`` also works. The guard at the top of the file detects
+that Streamlit is not running and relaunches the script through it, which makes
+the Run button in an editor behave the same way.
+"""
 # NBA Game Momentum Visualizer — Web App
 # ---------------------------------------
 # Run with:  streamlit run app.py
@@ -38,14 +59,48 @@ st.title("NBA Game Momentum Visualizer")
 
 @st.cache_data(ttl=3600, show_spinner="Loading teams...")
 def get_teams():
+    """Cached wrapper around fetch_teams().
+
+    The team list changes at most once a season, so an hour of cache costs
+    nothing and saves a request on every rerun.
+
+    Returns:
+        list: Team dicts with keys id, name, and abbr.
+    """
     return fetch_teams()
 
 @st.cache_data(ttl=600, show_spinner="Loading schedule...")
 def get_games(team_id, season):
+    """Cached wrapper around fetch_completed_games().
+
+    A shorter cache than the team list, because an in-progress season gains a
+    completed game every few days.
+
+    Args:
+        team_id (str): ESPN team ID.
+        season (int or None): Season year, or None for the current season.
+
+    Returns:
+        list: Completed game dicts, newest first.
+    """
     return fetch_completed_games(team_id, season)
 
 @st.cache_data(ttl=3600, show_spinner="Loading play-by-play...")
 def get_game_df(game_id):
+    """Run the whole pipeline for one game and resolve the team names.
+
+    This is the single call that the render branches below depend on. It wraps
+    fetch, parse, and compute in one cached unit, and also works out which side
+    was home, which the plotting functions need for their labels.
+
+    Args:
+        game_id (str): ESPN event ID.
+
+    Returns:
+        tuple: (df, home_name, away_name). The frame is None when the game has
+            no play by play data, which both branches check for. Team names
+            fall back to "Home" and "Away".
+    """
     raw = fetch_game_data(game_id)
     header = raw.get("header", {})
     team_map = build_team_map(header)
@@ -71,6 +126,21 @@ def get_game_df(game_id):
 # `slot` makes each widget's key unique so two pickers can coexist in compare mode.
 
 def render_game_picker(slot):
+    """Draw a complete team, season, and game picker in the sidebar.
+
+    One function serves both single game mode and compare mode. The slot
+    argument is appended to every widget key, producing team_1, season_2 and so
+    on, which is what keeps two pickers from colliding in session state. Follow
+    the same pattern if a third picker is ever needed.
+
+    Args:
+        slot (int): Unique identifier for this picker's widget keys.
+
+    Returns:
+        dict or None: The selected game dict, or None when the chosen team and
+            season have no completed games. Callers treat None as a stop signal.
+    """
+
     teams = get_teams()
     team = st.selectbox(
         "Team",

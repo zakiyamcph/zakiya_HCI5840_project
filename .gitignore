@@ -1,7 +1,4 @@
-# API keys 
-keys.py
-
-# Cached data and output
+\# Cached data and output
 data/
 output.html
 tmp/
@@ -32,3 +29,9 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Streamlit local secrets
+.streamlit/secrets.toml
+
+# Jython bytecode
+*$py.class

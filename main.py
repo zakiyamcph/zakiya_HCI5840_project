@@ -1,3 +1,30 @@
+"""NBA game momentum visualizer: data pipeline, charts, and command line app.
+
+This module owns everything that is not user interface. It fetches data from
+ESPN's public NBA endpoints, flattens play by play JSON into a pandas
+DataFrame, derives the score differential and the lead changes, and builds the
+Plotly figures. The command line application at the bottom of the file is one
+consumer of that pipeline and the Streamlit app in app.py is the other.
+
+Any function that transforms data or builds a figure belongs here so
+that both entry points get it for free. Nothing in this module runs on import
+because main() is guarded by an ``if __name__ == "__main__"`` block.
+
+The pipeline runs in a fixed order:
+    fetch_game_data -> build_team_map -> parse_plays -> compute_momentum
+    -> find_lead_changes -> plot_momentum
+
+Use:
+    $ python main.py
+
+Requires an internet connection. No API key is needed because the ESPN endpoints used
+here are public and unauthenticated.
+
+Attributes:
+    BASE_URL (str): Root of the ESPN NBA API. All requests are built from it.
+    DATA_DIR (str): Folder that CSV exports are written to.
+    OUTPUT_HTML (str): Filename for the standalone chart the CLI writes.
+"""
 # NBA Game Visualizer - Version 2
 # --------------------------------
 # Pick a team and game and get a summary and interactive Plotly chart of the game's momentum swings.
@@ -14,6 +41,21 @@ OUTPUT_HTML = "output.html"
 
 # Fetch JSON from ESPN's play-by-play endpoint
 def fetch_game_data(game_id):
+    """Fetch the full summary payload for one game from ESPN.
+
+    The summary endpoint returns the header (teams, venue, status) and the
+    plays array in a single response, so one request supplies everything the
+    rest of the pipeline needs.
+
+    Args:
+        game_id (str): ESPN event ID, taken from fetch_completed_games().
+
+    Returns:
+        dict: The decoded JSON response, guaranteed to contain a "header" key.
+
+    Raises:
+        SystemExit: If the request fails or the response has no header section.
+    """
     url = (
         f"{BASE_URL}/summary?event={game_id}"
     )
@@ -34,6 +76,18 @@ def fetch_game_data(game_id):
 
 # Extract team names from JSON header section
 def build_team_map(header):
+    """Build a lookup from ESPN team ID to display name.
+
+    Plays reference their team by ID only, so this map is what lets
+    parse_plays() attribute each play to a readable team name.
+
+    Args:
+        header (dict): The "header" section of a game summary response.
+
+    Returns:
+        dict: Team ID (str) mapped to display name (str). Falls back to the
+            short name, and then to the ID itself, when displayName is absent.
+    """
     team_map = {}
     competitions = header.get("competitions", [{}])
     competitors = competitions[0].get("competitors", [])
@@ -50,6 +104,19 @@ def build_team_map(header):
     return team_map
 
 def clock_to_seconds(clock_str):
+    """Convert a game clock string into seconds remaining in the period.
+
+    ESPN uses two formats: "7:42" for most of a period, and a bare decimal
+    such as "41.6" inside the final minute. Both are handled here.
+
+    Args:
+        clock_str (str): Clock display value, possibly empty.
+
+    Returns:
+        float: Seconds remaining in the period. Returns 0 for empty or
+            unrecognized input rather than raising, so one malformed play
+            cannot break a whole game.
+    """
     if not clock_str:
         return 0
 
@@ -63,6 +130,21 @@ def clock_to_seconds(clock_str):
         return 0
     
 def elapsed_time(period, clock_str):
+    """Convert a period and clock into seconds elapsed since tipoff.
+
+    This is what turns a set of per-period clocks into a single continuous
+    x axis. Regulation periods are 720 seconds each and overtime periods are
+    300 seconds each, which is the NBA rule and does not hold for other
+    leagues.
+
+    Args:
+        period (int): Period number. 1 through 4 are regulation, 5 and above
+            are overtime.
+        clock_str (str): Clock display value at the moment of the play.
+
+    Returns:
+        float: Seconds since the opening tipoff. Returns 0 for a period below 1.
+    """
     if period < 1:
         return 0
 
@@ -76,6 +158,15 @@ def elapsed_time(period, clock_str):
     return total_seconds
 
 def period_label(period):
+    """Turn a period number into a short human readable label.
+
+    Args:
+        period (int or None): Period number from the play data.
+
+    Returns:
+        str: "1st" through "4th" for regulation, "OT1", "OT2" and so on for
+            overtime, and "Unknown" when the period is missing.
+    """
     if period is None:
         return "Unknown"
     elif period == 1:
@@ -90,6 +181,24 @@ def period_label(period):
         return f"OT{period - 4}"
 
 def parse_plays(plays, team_map):
+    """Flatten ESPN's nested play JSON into flat row dicts.
+
+    This is the boundary between ESPN's data shape and the project's own. Every
+    downstream function reads the columns produced here by name, so this
+    function and compute_momentum() together define the internal schema.
+    Changing a key here means checking all three plotting functions and both
+    entry points.
+
+    Args:
+        plays (list): The "plays" array from a game summary response.
+        team_map (dict): Output of build_team_map(), used to resolve team IDs.
+
+    Returns:
+        list: One dict per play, with keys period, clock, team, type, text,
+            scoreValue, homeScore, awayScore, scoringPlay, periodLabel,
+            elapsedTime, and timeLabel. Returns an empty list when the game has
+            no play by play data, which the callers check for.
+    """
 
     rows = []
 
@@ -121,6 +230,22 @@ def parse_plays(plays, team_map):
 # Build momentum column
 
 def compute_momentum(df):
+    """Add the derived momentum columns to a parsed play by play frame.
+
+    "Momentum" here is the raw score differential, home minus away. It is not a
+    weighted or rolling metric, so a long scoreless stretch reads as a flat
+    line rather than as fading momentum. See the developer's guide for why that
+    tradeoff was made and what a real momentum metric would involve.
+
+    Args:
+        df (pandas.DataFrame): Frame built from parse_plays() output.
+
+    Returns:
+        pandas.DataFrame: A copy with rows lacking scores dropped, the index
+            reset, and three columns added: momentum (home minus away), swing
+            (absolute change in momentum from the previous row, NaN in row 0),
+            and gameMinutes (elapsed time in minutes, used as the x axis).
+    """
 
     # Drop rows where scores are missing 
     df = df.dropna(subset=["homeScore", "awayScore"]).copy()
@@ -139,6 +264,20 @@ def compute_momentum(df):
 # Identify lead changes
 
 def find_lead_changes(df):
+    """Find the plays where the lead changed hands.
+
+    Works on the sign of the momentum column. Ties are excluded from the
+    comparison by replacing zeros with NaN and forward filling, so a game that
+    goes from a home lead to tied and back to a home lead does not register as
+    two lead changes.
+
+    Args:
+        df (pandas.DataFrame): Output of compute_momentum().
+
+    Returns:
+        pandas.DataFrame: A copy containing only the rows where the lead
+            flipped. Empty for a wire to wire win, which callers check for.
+    """
 
     import numpy as np
     sign = np.sign(df["momentum"]).astype(int)
@@ -148,6 +287,19 @@ def find_lead_changes(df):
 
 # Quarter / OT divider lines along the game-minute scale
 def add_period_markers(fig, max_minutes):
+    """Draw quarter and overtime dividers onto a figure, in place.
+
+    Called by both plot_momentum() and plot_comparison() so the two charts
+    share one time scale treatment.
+
+    Args:
+        fig (plotly.graph_objects.Figure): Figure to annotate. Modified in place.
+        max_minutes (float): Longest game minute value on the chart. Used to
+            decide how many overtime dividers to add.
+
+    Returns:
+        None: The figure is modified in place.
+    """
 
     boundaries = [12, 24, 36]
     labels = [("Q1", 6), ("Q2", 18), ("Q3", 30), ("Q4", 42)]
@@ -171,7 +323,24 @@ def add_period_markers(fig, max_minutes):
 
 # Plotly graph
 def plot_momentum(df, lead_changes, home_name="Home", away_name="Away"):
+    """Build the single game momentum chart.
 
+    The chart has four layers: the momentum line itself, a dashed zero line
+    marking a tied game, star markers on the lead changes, and the quarter
+    dividers added by add_period_markers(). Above the zero line the home team
+    leads; below it the away team leads.
+
+    Args:
+        df (pandas.DataFrame): Output of compute_momentum().
+        lead_changes (pandas.DataFrame): Output of find_lead_changes(). An
+            empty frame is handled and simply produces no markers.
+        home_name (str): Home team display name, used in hover text and title.
+        away_name (str): Away team display name, used in hover text and title.
+
+    Returns:
+        plotly.graph_objects.Figure: Ready to render with st.plotly_chart(),
+            write_html(), or show().
+    """
     fig = go.Figure()
 
     # --- Main momentum line ---
@@ -239,6 +408,18 @@ def plot_momentum(df, lead_changes, home_name="Home", away_name="Away"):
 # in the other appears above zero in one and below zero in the other. Easy to misread.
 # TODO: accept a reference-team argument and negate the differential when that team was away.
 def plot_comparison(games):
+    """Overlay two games' momentum lines on one shared game time axis.
+
+    Args:
+        games (list): List of dicts, each with a "df" key holding a frame from
+            compute_momentum() and a "label" key holding the display name for
+            the legend and hover box. The list shape is the contract here, so a
+            future three game overlay would extend this rather than replace it,
+            though the colors list would need extending too.
+
+    Returns:
+        plotly.graph_objects.Figure: The overlay chart.
+    """
     fig = go.Figure()
     colors = ["#1d428a", "#c8102e"]   # NBA blue / NBA red
 
@@ -282,12 +463,32 @@ def plot_comparison(games):
     return fig
 
 def save_csv(df, path):
+    """Write a play by play frame to CSV, creating the folder if needed.
+
+    Args:
+        df (pandas.DataFrame): Frame to write.
+        path (str): Destination path, including a folder component.
+
+    Returns:
+        None
+    """
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     df.to_csv(path, index=False)
 
 # Fetch all 30 NBA teams (one small request)
 def fetch_teams():
+    """Fetch the full NBA team list from ESPN.
+
+    One small request that feeds both the CLI team prompt and the web app
+    dropdown. The web app caches it for an hour.
+
+    Returns:
+        list: Dicts with keys id, name, and abbr, sorted alphabetically by name.
+
+    Raises:
+        SystemExit: If the request fails or the response shape is unexpected.
+    """
     url = f"{BASE_URL}/teams?limit=32"
     try:
         response = requests.get(url)
@@ -316,6 +517,15 @@ def fetch_teams():
 
 # Pick a team by number OR by typing part of a name/abbreviation
 def choose_team():
+    """Prompt at the terminal until the user picks one team.
+
+    Accepts either a list index or a substring of the team name or its
+    abbreviation. An ambiguous substring reprompts with the matches shown.
+    Command line only; the web app uses a dropdown instead.
+
+    Returns:
+        dict: The selected team, with keys id, name, and abbr.
+    """
     teams = fetch_teams()
 
     print("\nNBA Teams:")
@@ -349,6 +559,24 @@ def choose_team():
 
 # Fetch a team's schedule, keep only completed games
 def fetch_completed_games(team_id, season=None):
+    """Fetch one team's schedule and keep only the finished games.
+
+    Live and scheduled games are filtered out, since the pipeline needs a
+    complete play by play run to chart anything.
+
+    Args:
+        team_id (str): ESPN team ID.
+        season (int or str, optional): Season year as ESPN labels it, meaning
+            the year the season ends. 2026 is the 2025-26 season. Pass None to
+            let ESPN decide the current season.
+
+    Returns:
+        list: Dicts with keys id, date, name, and score, newest first. Empty
+            when the team and season combination has no finished games.
+
+    Raises:
+        SystemExit: If the schedule request fails.
+    """
     url = f"{BASE_URL}/teams/{team_id}/schedule"
     if season:
         url += f"?season={season}"
@@ -389,6 +617,19 @@ def fetch_completed_games(team_id, season=None):
 
 # Show recent games 10 at a time and let the user pick one
 def choose_game(team, games_per_page=10):
+    """Prompt at the terminal for a season, then page through that team's games.
+
+    Command line only. The web app renders the same data as a scrollable radio
+    list instead.
+
+    Args:
+        team (dict): Team dict from choose_team().
+        games_per_page (int): How many games to show per page.
+
+    Returns:
+        dict or None: The selected game, or None when the season has no
+            completed games. main() treats None as a clean exit.
+    """
     season = input(f"\nSeason year for {team['name']} (Enter for current, e.g. 2026 = the 2025-26 season): ").strip()
     games = fetch_completed_games(team["id"], season or None)
 
@@ -421,6 +662,19 @@ def choose_game(team, games_per_page=10):
 
 
 def main():
+    """Run the command line application end to end.
+
+    Prompts for a team and a game, fetches and parses the play by play, prints
+    a summary and every lead change, saves the parsed data to CSV under
+    DATA_DIR, writes the chart to OUTPUT_HTML, and opens it in the browser.
+
+    Returns:
+        None
+
+    Raises:
+        SystemExit: With code 0 when the user backs out of game selection, and
+            with code 1 when the game has no play data.
+    """
     team = choose_team()
     game_choice = choose_game(team)
     if game_choice is None:
